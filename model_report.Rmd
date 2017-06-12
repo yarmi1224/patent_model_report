@@ -1,0 +1,735 @@
+---
+title: "**SiC CMP 專利分析之模型與結果報告**"
+runtime: shiny
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+###*此研究為應用本體論於 SiC CMP 專利分類，分析流程如下：*
+
+###一、CMP Ontology
+1. 匯入預先於 Protege 建立之 CMP 本體論 (OBO格式擋)
+2. 取出將本體論之各分類名稱
+3. 將名稱進行去除標點符號、詞幹化
+
+
+1. 匯入 SiC iC CMP 專利資料 (.csv檔)
+2. 取標題、摘要、權利要求項建立語料庫
+3. 文字預處理：轉小寫、去除標點符號、去除數字、去除停字、消除空格、詞幹提取
+4. 斷詞：一元字、二元字及三元字
+5. 計算 TF-IDF，並建立文件-字詞矩陣
+6. 刪除出現低於2篇文件之字詞 (減低系統負荷)
+7. 統計各字詞之TF-IDF，並建立詞庫表 (名稱：gram_word)
+
+###三、進行技術分類 (Slurry / Dresser / Pad / Precess / Apparatus)
+###    ( 以 Slurry 分類為例 )
+1. 以 Slurry 之本體論分類名稱建立 Data frame (名稱：onto_slurry)
+2. 建立 Slurry 詞庫 (word_slurry)
+   (1)以詞庫比對法取出 onto_slurry 於 gram_word 中有出現之字詞
+   (2)利用關聯字詞分析，分析語料庫中與 onto_slurry 關聯之字詞，
+      並以人工篩選高相關度字詞補充進 word_slurry中
+3. 將有出現Slurry相關字詞之文件篩選出，並建立文件-字詞矩陣
+4. 計算每篇文件 Slurry 相關字詞的 TF-IDF 總和
+5. 重覆以上方法分別計算 Dresser / Pad / Precess / Apparatus 之 TF-IDF 總和
+6. 進行分類權重比對，選出　TF-IDF　總和最高之分類，及代表該文件之分類
+7. 將分類結果加入原專利表中
+
+###四、技術概念分析( 以 Slurry 概念分析為例 )
+1. 選出技術分類為 Slurry 之專利群
+2. 建立語料庫，進行文字預處理
+3. 斷詞：一元字、二元字及三元字
+4. 計算 TF-IDF，建立文件-字詞矩陣 (此步驟不進行刪除出現低於2篇文件之字詞)
+5. 統計各字詞之TF-IDF，並建立詞庫表
+6. 建立新Slurry 詞庫：以詞庫比對法取出 onto_slurry 於 gram_word 中有出現之字詞
+7. 將有出現Slurry相關字詞之文件篩選出，並建立文件-字詞矩陣
+8. 篩選出 TF-IDF 權重最高之相關字詞，以代表該文件之概念
+9. 將概念分析結果加入原專利表中
+
+
+## Analysis Model---------------------------------------------------------------------
+### 一、CMP Ontology
+1. 匯入預先於 Protege 建立之 CMP 本體論 (OBO格式擋)
+2. 取出將本體論之各分類名稱
+3. 將名稱進行去除標點符號、詞幹化
+4. 建立本體論詞庫
+
+載入讀取ontology之套件
+```{r}
+library("NLP")
+library("ontologyIndex")
+library("tm")
+```
+
+匯入預先於 Protege 建立之 CMP 本體論 (OBO格式擋)
+```{r}
+#Load ontology OBO file
+ontology <- get_ontology("cmp_obo.obo", propagate_relationships = "is_a")
+```
+
+取出將本體論之各分類名稱
+將名稱進行去除標點符號、詞幹化
+```{r}
+#Build Ontology Corpus
+ontology_terms <- as.data.frame(ontology$id)
+ontology_corpus <- Corpus(DataframeSource(ontology_terms))
+
+#Pre-processing and tranforming the Corpus
+corpus_ontology <- tm_map(ontology_corpus, gsub, pattern = "_", replacement = " ")
+corpus_ontology <- tm_map(corpus_ontology,tolower) #轉小寫
+corpus_ontology <- tm_map(corpus_ontology, stripWhitespace) #消除空格
+corpus_ontology <- tm_map(corpus_ontology, stemDocument) #詞幹處理
+
+#Print all ontology words
+for (i in 1:77){
+  word <- corpus_ontology[[i]]
+  print(paste(word))}
+```
+
+建立本體論詞庫
+```{r}
+#Build dictionary words of ontology 
+dictionary_word <- c("neutral", "abras", "particl", "acid", "apparatus", "back film", "basic", "carrier", 
+                     "chemic", "chromat","confoc", "clean", "cmp", "compens type", "compress", 
+                     "comsum", "control", "pressur", "dresser", "condition", "detect", 
+                     "flow","rate", "fractal", "groov", "hard", "improv type", "infrar", 
+                     "laser", "layer", "measur", "micro stuctur", "monitor", 
+                     "multi layer", "none-por", "nonwoven", "pad", "pad applic", "pad condit", 
+                     "pad materi", "pad properti", "pad structur", "ph","planet", "plate", 
+                     "plat", "ratio", "polish head", "polish system", "polym", "polyurethan", 
+                     "porous", "process"," paramet", "path", "time", "recoveri", "speed", 
+                     "rough", "scatter", "semiconductor", "sensor", "signal", "singl layer", 
+                     "slurri", "flow rate",  "stirrer", "slurri suppli", 
+                     "temperatur", "weight percentag","wt", "storag cmp", "stylus profil", "substrat cmp", 
+                     "thick", "transfer robot", "ultrason", "urethan", "wafer cassett", "wafer transfer", 
+                     "white light interferomet", "youngs modulus","liquid")
+
+```
+
+### 二、SiC CMP 專利資料預處理
+1. 匯入 SiC iC CMP 專利資料 (.csv檔)
+2. 取標題、摘要、權利要求項建立語料庫
+3. 文字預處理：轉小寫、去除標點符號、去除數字、去除停字、消除空格、詞幹提取
+4. 斷詞：一元字、二元字及三元字
+5. 計算 TF-IDF，並建立文件-字詞矩陣
+6. 刪除出現低於2篇文件之字詞 (減低系統負荷)
+7. 統計各字詞之TF-IDF，並建立詞庫表 (名稱：gram_word)
+
+
+讀取Orbit資料庫下載之專利資料
+```{r}
+cluster1_df<- read.csv("SiC CMP_2.csv",stringsAsFactors = F)
+cluster1_combined <- cluster1_df[,c(2,3,4)]
+```
+
+![cluster1_combined](cluster_1_combined.png)
+
+建立語料庫及文字預處理
+```{r}
+corpus <- Corpus(DataframeSource(cluster1_combined))
+corpus #顯示語料庫資料
+
+#Pre-processing and tranforming the Corpus
+myStopwords <- c(stopwords("english"), stopwords("SMART"),"claim")
+corpus_tm <- tm_map(corpus, content_transformer(tolower))
+corpus_tm <- tm_map(corpus_tm, removePunctuation) #去除標點符號
+corpus_tm <- tm_map(corpus_tm, removeNumbers) #去除數字
+corpus_tm <- tm_map(corpus_tm, removeWords, myStopwords)  #消除停止(SMART&English)
+corpus_tm <- tm_map(corpus_tm, stripWhitespace) #消除空格
+corpus_tm <- tm_map(corpus_tm, stemDocument)
+corpus_tm 
+```
+
+
+一元字、二元字、三元字斷詞處理，並計算TF-IDF詞頻
+```{r}
+# 一元字、二元字、三元字模型---------------------------------------------------------------------------------
+library(RWeka)
+BigramTokenizer <- function(x) NGramTokenizer(x, Weka_control(min = 1, max = 3))
+gram_dtm <- DocumentTermMatrix(corpus_tm, control = list(tokenize = BigramTokenizer,
+                                                         weighting = function(x) weightTfIdf(x, normalize = TRUE)))
+```
+
+
+刪除出現低於2篇文件之字詞 (減低系統負荷)
+```{r}
+gram_dtm <- removeSparseTerms(gram_dtm, 1-(2/length(corpus_tm)))                                                         
+inspect(gram_dtm)
+```
+
+
+建立總詞庫表 (總詞庫表名稱：gram_word)
+```{r}
+#Patent extract
+library(magrittr)
+gram_word_df <- as.matrix(gram_dtm) %>%
+                 colSums() %>%
+                 sort(.,decreasing=TRUE) %>%
+                 data.frame(row.names = NULL, word=names(.), TFIDF=.)
+
+#View(gram_word_df)
+
+gram_word <- data.frame(word=gram_word_df$word)
+```
+
+
+###三、進行技術分類 (Slurry / Dresser / Pad / Precess / Apparatus)
+###    ( 以 Slurry 分類為例 )
+1. 以 Slurry 之本體論分類名稱建立 Data frame (名稱：onto_slurry)
+2. 建立 Slurry 詞庫 (word_slurry)
+   (1)以詞庫比對法取出 onto_slurry 於 gram_word 中有出現之相關字詞
+   (2)利用關聯字詞分析，分析語料庫中與 onto_slurry 關聯之字詞，
+      並以人工篩選高相關度字詞補充進 word_slurry中。
+
+3. 將有出現Slurry相關字詞之文件篩選出，並建立文件-字詞矩陣
+4. 計算每篇文件 Slurry 相關字詞的 TF-IDF 總和
+5. 重覆以上方法分別計算 Dresser / Pad / Precess / Apparatus 之 TF-IDF 總和
+6. 進行分類權重比對，選出　TF-IDF　總和最高之分類，及代表該文件之分類
+7. 將分類結果加入原專利表中
+
+
+以 Slurry 之本體論分類名稱建立 Data frame (名稱：onto_slurry)
+```{r}
+# Slurry -----------------------------------------------------------------------------------------------------
+onto_slurry <- data.frame(word=c("abras ", "particl", "basic", "slurri", "weight percentag","liquid", "solut",
+                                 "hss", "alkalin", "alkali", "acid", "basic", " ph "))
+```
+
+
+建立 Slurry 詞庫 (word_slurry)：
+(1)以詞庫比對法取出 onto_slurry 於 gram_word 中有出現之相關字詞
+(2)利用關聯字詞分析(assocs_slurry)，分析語料庫中與 onto_slurry 關聯之字詞，
+   並以人工篩選高相關度字詞補充進 word_slurry中。
+```{r}
+#assocs_slurry <- findAssocs(gram_dtm, c("dresser", "dress","condition", "condit" , "diamond", "disk", "wear"), 0.5)
+
+word_slurry <- NULL 
+        for (i in 1:length(onto_slurry$word)) { 
+          word_slurry<-data.frame(Slurry_word=(gram_word[grep(onto_slurry$word[i], gram_word$word),])) %>%
+          rbind(word_slurry)
+          } 
+```
+
+
+將有出現Slurry相關字詞之文件篩選出，並建立文件-字詞矩陣
+```{r}
+mat_slurri  <- as.character(word_slurry$Slurry_word) %>%
+               unique()  %>%
+               gram_dtm[,.] %>%
+               as.matrix() 
+```
+
+
+計算每篇文件 Slurry 相關字詞的 TF-IDF 總和
+```{r}
+TFIDF_slurri <- cbind(Slurri_TFIDF=rowSums(mat_slurri),mat_slurri) %>%
+                cbind(Publication.numbers=cluster1_df$Publication.numbers, Title=cluster1_df$Title, .)  %>%
+                .[rowSums(mat_slurri)!=0, ] %>%
+                as.data.frame()
+#View(TFIDF_slurri)
+```
+
+有出現slurry相關字詞之專利
+![](TFIDF_slurri.png)
+
+
+Dresser 相關專利分析
+```{r}
+# Dsserer & Condition (15)----------------------------------------------------------------------------
+#Add (disk)
+onto_dresser <- data.frame(word=c("dresser", "dress","condition", "condit" , "diamond", "disk", "wear"))
+
+#assocs_dresser <- findAssocs(gram_dtm, c("dresser", "dress","condition", "condit" , "diamond", "disk", "wear"), 0.4)
+word_dresser <- NULL 
+for (i in 1:length(onto_dresser$word)) { 
+  word_dresser<-data.frame(Dresser_word=(gram_word[grep(onto_dresser$word[i], gram_word$word),])) %>%
+    rbind(word_dresser)
+} 
+
+mat_dresser  <- as.character(word_dresser$Dresser_word) %>%
+                unique()  %>%
+                gram_dtm[,.] %>%
+                as.matrix() 
+
+
+TFIDF_dresser <- cbind(Dsserer_TFIDF=rowSums(mat_dresser),mat_dresser) %>%
+                cbind(Publication.numbers=cluster1_df$Publication.numbers, Title=cluster1_df$Title, .)  %>%
+                .[rowSums(mat_dresser)!=0, ] %>%
+                as.data.frame()
+#View(TFIDF_dresser)  
+
+```
+
+有出現Dsserer相關字詞之專利
+![](TFIDF_dresser.png)
+
+Pad相關專利分析
+```{r}
+# Pad--------------------------------------------------------------------------------------------
+onto_pad <- data.frame(word=c(c("pad", "urethan", "polyurethan", "pad materi", "groov", "nonwoven", "porous",
+                                "compress", "pad layer", "pad thick", "polish pad layer", "singl layer","pad structur")))
+
+#assocs_pad <- findAssocs(gram_dtm, c("pad", "urethan", "polyurethan", "pad materi", "groov", "nonwoven", "porous",
+#                                     "compress", "pad layer", "pad thick", "polish pad layer", "singl layer","pad structur"), 0.5) 
+
+word_pad <- NULL 
+               for (i in 1:length(onto_pad$word)) { 
+               word_pad<-data.frame(Pad_word=(gram_word[grep(onto_pad$word[i], gram_word$word),])) %>%
+               rbind(word_pad)
+               } 
+
+mat_pad  <- as.character(word_pad$Pad_word) %>%
+                unique()  %>%
+                gram_dtm[,.] %>%
+                as.matrix()          
+
+
+TFIDF_pad <- cbind(TFIDF_SUM=rowSums(mat_pad),mat_pad) %>%
+  cbind(Publication.numbers=cluster1_df$Publication.numbers, Title=cluster1_df$Title, .)  %>%
+  .[rowSums(mat_pad)!=0, ] %>%
+  as.data.frame()
+
+#View(TFIDF_pad)  
+```
+
+有出現Pad相關字詞之專利
+![](TFIDF_pad.png)
+
+Process相關專利分析
+```{r}
+# Process--------------------------------------------------------------------------------------------
+onto_process <- data.frame(word=c("process", "paramet", "speed", "rpm", "ph", "temperatur", "weight", "wt", 
+                                  "time", "flow rate", "mlmin","pressur", "forc", "psi", "kpa", "molecular"))
+
+#assocs_process <- findAssocs(gram_dtm, c("process", "paramet","speed", "rpm", "ph", "temperatur", "weight", 
+#                                         "wt", "time", "flow rate", "mlmin","pressur", "forc", "psi", "kpa", "molecular"), 0.5) 
+
+word_process <- NULL 
+                  for (i in 1:length(onto_process$word)) { 
+                    word_process<-data.frame(Process_word=(gram_word[grep(onto_process$word[i], gram_word$word),])) %>% 
+                      rbind(word_process)
+                    } 
+
+mat_process <- as.character(word_process$Process_word) %>%
+              unique()  %>%
+              gram_dtm[,.] %>%
+              as.matrix()     
+
+
+TFIDF_process <- cbind(TFIDF_SUM=rowSums(mat_process),mat_process) %>%
+               cbind(Publication.numbers=cluster1_df$Publication.numbers, Title=cluster1_df$Title, .)  %>%
+               .[rowSums(mat_process)!=0, ] %>%
+                as.data.frame()
+
+#View(TFIDF_process)  
+```
+
+有出現process相關字詞之專利
+![](TFIDF_process.png)
+
+Apparatus相關專利分析
+```{r}
+# Apparatus--------------------------------------------------------------------------------------------
+#find ("equip", "color identifi", "carrier", "devic", "head", "end point", "tool", "plasma", "treat", "treatment")
+
+#assocs_apparatus <- findAssocs(gram_dtm, c("apparatus", "equip", "system", "transfer","detect", "suppli", 
+#                                           "clean", "measur", "monitor", "control", "stirrer", "signal",  "infrar",
+#                                           "scatter", "laser", "ultrason", "sensor", "color identifi", "carrier", 
+#                                           "devic", "head", "plate", "platen", "end point", "tool", "plasma", 
+#                                           "electron", "microscop", "treat", "treatment", "light"), 0.5) 
+
+
+onto_apparatus <- data.frame(word=c("apparatus", "equip", "system", "transfer","detect", "suppli", 
+                                    "clean", "measur", "monitor", "control", "stirrer", "signal",  "infrar",
+                                    "scatter", "laser", "ultrason", "sensor", "color identifi", "carrier", 
+                                    "devic", "head", "plate", "platen", "end point", "tool", "plasma", 
+                                    "electron", "microscop", "treat", "treatment", "light"))
+
+
+word_apparatus <- NULL 
+for (i in 1:length(onto_apparatus$word)) { 
+  word_apparatus<-data.frame(Apparatus_word=(gram_word[grep(onto_apparatus$word[i], gram_word$word),])) %>% 
+    rbind(word_apparatus)
+} 
+
+mat_apparatus <- as.character(word_apparatus$Apparatus_word) %>%
+  unique()  %>%
+  gram_dtm[,.] %>%
+  as.matrix()   
+
+
+TFIDF_apparatus <- cbind(TFIDF_SUM=rowSums(mat_apparatus),mat_apparatus) %>%
+  cbind(Publication.numbers=cluster1_df$Publication.numbers, Title=cluster1_df$Title, .)  %>%
+  .[rowSums(mat_apparatus)!=0, ] %>%
+  as.data.frame()
+
+#View(TFIDF_apparatus) 
+```
+有出現apparatus相關字詞之專利
+![](TFIDF_apparatus.png)
+
+進行分類權重比對，判斷　TF-IDF　總和最高之分類，及代表該文件之分類結果
+再將分類結果加入原專利表中
+```{r}
+# Technical classification-----------------------------------------------------------------------
+#bind each TFIDF column into the same dataframe
+bind_slurry <- TFIDF_slurri[,3][match(rownames(cluster1_df), rownames(TFIDF_slurri))] 
+bind_dresser <- TFIDF_dresser[,3][match(rownames(cluster1_df), rownames(TFIDF_dresser))]
+bind_pad <- TFIDF_pad[,3][match(rownames(cluster1_df), rownames(TFIDF_pad))]
+bind_process <- TFIDF_process[,3][match(rownames(cluster1_df), rownames(TFIDF_process))]
+bind_apparatus <- TFIDF_process[,3][match(rownames(cluster1_df), rownames(TFIDF_apparatus))]
+
+
+bind_cmp <- cbind(cluster1_df[,c(2,3)], 
+                  Slurri=bind_slurry,
+                  Dresser=bind_dresser,
+                  Pad=bind_pad,
+                  Process=bind_process,
+                  Apparatus=bind_apparatus)
+
+
+bind_cmp_df <- data.frame(Slurry=bind_cmp$Slurri, 
+                     Dresser=bind_cmp$Dresser, 
+                     Pad=bind_cmp$Pad,
+                     Process=bind_cmp$Process,
+                     Apparatus=bind_cmp$Apparatus)
+
+tech_category <- apply(bind_cmp_df, 1, which.max) %>%
+        as.integer() %>%
+        colnames(bind_cmp_df)[.] %>%
+        #as.matrix() %>%
+        cbind(cluster1_df[,c(1,2,3,4,5)], category=.)%>%
+        as.data.frame() 
+
+tech_category_2 <- cbind(cluster1_df[ , 1:4], 
+                         category= tech_category$category, 
+                         bind_cmp_df)
+
+#View(tech_category)
+```
+
+
+
+## 技術分類結果 (Slurry / Dresser / Pad / Precess / Apparatus)
+
+- [技術分類結果表單連結](https://yarmi1224.shinyapps.io/category/)
+技術分類結果表單
+![](SiC CMP Patent Category.png)
+
+
+
+###四、技術概念分析( 以 Slurry 概念分析為例 )
+1. 選出技術分類為 Slurry 之專利群
+2. 建立語料庫，進行文字預處理
+3. 斷詞：一元字、二元字及三元字
+4. 計算 TF-IDF，建立文件-字詞矩陣 (此步驟不進行刪除出現低於2篇文件之字詞)
+5. 統計各字詞之TF-IDF，並建立詞庫表
+6. 建立新Slurry 詞庫：以詞庫比對法取出 onto_slurry 於 gram_word 中有出現之字詞
+7. 將有出現Slurry相關字詞之文件篩選出，並建立文件-字詞矩陣
+8. 篩選出 TF-IDF 權重最高之相關字詞，以代表該文件之概念
+9. 將概念分析結果加入原專利表中
+
+
+選出技術分類為 Slurry 之專利群
+```{r}
+# Concept extract
+#Slurry concept --------------------------------------------------------------------------------------
+df_slurry <- as.data.frame(tech_category_2[tech_category_2$category=="Slurry",], stringsAsFactors = F)
+```
+
+建立語料庫，進行文字預處理
+```{r}
+corpus_slurry <- df_slurry[,c(2,3,4)] %>% 
+                 DataframeSource() %>%
+                 Corpus()
+
+#Pre-processing and tranforming the Corpus
+#myStopwords <- c(stopwords("english"), stopwords("SMART"),"claim")
+Slurry_tm <- tm_map(corpus_slurry, content_transformer(tolower)) %>%
+             tm_map(removePunctuation) %>% #去除標點符號
+             tm_map(removeNumbers)  %>% #去除數字
+             tm_map(removeWords, myStopwords)  %>% #消除停止(SMART&English)
+             tm_map(stripWhitespace) %>% #消除空格
+             tm_map(stemDocument)
+
+```
+
+斷詞處理：一元字、二元字及三元字
+計算 TF-IDF，建立文件-字詞矩陣 (此步驟不進行刪除出現低於2篇文件之字詞)
+```{r}
+dtm_slurry <- DocumentTermMatrix(Slurry_tm, control = list(tokenize = BigramTokenizer,
+                                                     weighting = function(x) weightTfIdf(x, normalize = TRUE)))
+
+inspect(dtm_slurry)
+```
+
+
+建立語料庫之總詞庫表
+```{r}
+#all word data frame
+word2_slurry <- as.matrix(dtm_slurry) %>%
+                colSums() %>%
+                sort(.,decreasing=TRUE) %>%
+                data.frame(row.names = NULL, word=names(.), TFIDF=.)
+```
+
+
+建立新Slurry 詞庫：以詞庫比對法取出 onto_slurry 於 word2_slurry 之相關字詞
+```{r}
+diction_slurry <- NULL 
+for (i in 1:length(onto_slurry$word)) { 
+  diction_slurry<-data.frame(word2_slurry[grep(onto_slurry$word[i], word2_slurry$word), ]) %>%
+  rbind(diction_slurry)
+} 
+```
+
+將有出現Slurry相關字詞之文件篩選出，並建立文件-字詞矩陣
+```{r}
+#key word matrix
+mat2_slurry <- as.character(diction_slurry$word) %>%
+              unique()  %>%
+              dtm_slurry[,.] %>%
+              as.matrix() 
+```
+
+篩選出 TF-IDF 權重最高之相關字詞，以代表該文件之概念
+```{r}
+#find word with maximum TFIDF
+concept_slurry <- apply(mat2_slurry, 1, which.max) %>%
+               colnames(mat2_slurry)[.] %>%
+               cbind(Publication.numbers=df_slurry$Publication.numbers, concept=., max_TFIDF=apply(mat2_slurry, 1, max))%>%
+               as.data.frame()
+#View(concept_slurry)
+```
+
+
+各篇Dresser專利之重點概念分析
+```{r}
+#Dresser & Condition concept --------------------------------------------------------------------------------------
+
+df_dresser <- as.data.frame(tech_category_2[tech_category_2$category=="Dresser",], stringsAsFactors = F)
+corpus_dresser <- df_dresser[,c(2,3,4)] %>% 
+                  DataframeSource() %>%
+                  Corpus()
+
+#Pre-processing and tranforming the Corpus
+#myStopwords <- c(stopwords("english"), stopwords("SMART"),"claim")
+dresser_tm <- tm_map(corpus_dresser, content_transformer(tolower)) %>%
+              tm_map(removePunctuation) %>% #去除標點符號
+              tm_map(removeNumbers)  %>% #去除數字
+              tm_map(removeWords, myStopwords)  %>% #消除停止(SMART&English)
+              tm_map(stripWhitespace) %>% #消除空格
+              tm_map(stemDocument)
+
+dtm_dresser <- DocumentTermMatrix(dresser_tm, control = list(tokenize = BigramTokenizer,
+                                                             weighting = function(x) weightTfIdf(x, normalize = TRUE)))
+
+inspect(dtm_dresser)
+
+#all word data frame
+word2_dresser <- as.matrix(dtm_dresser) %>%
+                 colSums() %>%
+                 sort(.,decreasing=TRUE) %>%
+                 data.frame(row.names = NULL, word=names(.), TFIDF=.)
+
+#ontology word dictionary
+#onto_dresser <- data.frame(word=c("dresser", "condition", "condit", "diamond", "disk"))
+diction_dresser <- NULL 
+for (i in 1:length(onto_dresser$word)) { 
+  diction_dresser<-data.frame(word2_dresser[grep(onto_dresser$word[i], word2_dresser$word), ]) %>%
+    rbind(diction_dresser)
+} 
+
+#key word matrix
+mat2_dresser <- as.character(diction_dresser$word) %>%
+                unique()  %>%
+                dtm_dresser[,.] %>%
+                as.matrix() 
+
+#find word with max TFIDF
+concept_dresser <- apply(mat2_dresser, 1, which.max) %>%
+                   colnames(mat2_dresser)[.] %>%
+                   cbind(Publication.numbers=df_dresser$Publication.numbers, concept=., max_TFIDF=apply(mat2_dresser, 1, max))%>%
+                   as.data.frame()
+#View(concept_dresser)
+```
+
+各篇Pad專利之重點概念分析
+```{r}
+#Pad concept --------------------------------------------------------------------------------------
+df_pad <- as.data.frame(tech_category_2[tech_category_2$category=="Pad",], stringsAsFactors = F)
+corpus_pad <- df_pad[,c(2,3,4)] %>% 
+              DataframeSource() %>%
+              Corpus()
+
+#Pre-processing and tranforming the Corpus
+#myStopwords <- c(stopwords("english"), stopwords("SMART"),"claim")
+pad_tm <- tm_map(corpus_pad, content_transformer(tolower)) %>%
+          tm_map(removePunctuation) %>% #去除標點符號
+          tm_map(removeNumbers)  %>% #去除數字
+          tm_map(removeWords, myStopwords)  %>% #消除停止(SMART&English)
+          tm_map(stripWhitespace) %>% #消除空格
+          tm_map(stemDocument)
+
+dtm_pad <- DocumentTermMatrix(pad_tm, control = list(tokenize = BigramTokenizer,
+                                                    weighting = function(x) weightTfIdf(x, normalize = TRUE)))
+
+inspect(dtm_pad)
+
+#all word data frame
+word2_pad <- as.matrix(dtm_pad) %>%
+             colSums() %>%
+             sort(.,decreasing=TRUE) %>%
+             data.frame(row.names = NULL, word=names(.), TFIDF=.)
+
+#ontology word dictionary
+#onto_pad <- data.frame(word=c("urethan", "polyurethan", "pad materi", "pad","groov", "nonwoven", "compress"))
+diction_pad <- NULL 
+for (i in 1:length(onto_pad$word)) { 
+  diction_pad<-data.frame(word2_pad[grep(onto_pad$word[i], word2_pad$word), ]) %>%
+    rbind(diction_pad)
+} 
+
+#key word matrix
+mat2_pad<- as.character(diction_pad$word) %>%
+                unique()  %>%
+                dtm_pad[,.] %>%
+                as.matrix() 
+
+#find word with max TFIDF
+concept_pad <- apply(mat2_pad, 1, which.max) %>%
+               colnames(mat2_pad)[.] %>%
+               cbind(Publication.numbers=df_pad$Publication.numbers, concept=., max_TFIDF=apply(mat2_pad, 1, max))%>%
+               as.data.frame()
+#View(concept_pad)
+```
+
+
+各篇Process專利之重點概念分析
+```{r}
+#Process concept --------------------------------------------------------------------------------------
+
+df_process <- as.data.frame(tech_category_2[tech_category_2$category=="Process",], stringsAsFactors = F)
+corpus_process <- df_process[,c(2,3,4)] %>% 
+                   DataframeSource() %>%
+                   Corpus()
+
+#Pre-processing and tranforming the Corpus
+#myStopwords <- c(stopwords("english"), stopwords("SMART"),"claim")
+process_tm <- tm_map(corpus_process, content_transformer(tolower)) %>%
+               tm_map(removePunctuation) %>% #去除標點符號
+               tm_map(removeNumbers)  %>% #去除數字
+               tm_map(removeWords, myStopwords)  %>% #消除停止(SMART&English)
+               tm_map(stripWhitespace) %>% #消除空格
+               tm_map(stemDocument)
+
+dtm_process <- DocumentTermMatrix(process_tm, control = list(tokenize = BigramTokenizer,
+                                                             weighting = function(x) weightTfIdf(x, normalize = TRUE)))
+
+inspect(dtm_process)
+
+#all word data frame
+word2_process <- as.matrix(dtm_process) %>%
+                 colSums() %>%
+                 sort(.,decreasing=TRUE) %>%
+                 data.frame(row.names = NULL, word=names(.), TFIDF=.)
+
+#ontology word dictionary
+#onto_process <- data.frame(word=c("process", "speed", "rpm", "ph", "temperatur", "weight", "wt", "time", "flow rate", "mlmin","pressur", "forc", "psi", "kpa"))
+diction_process <- NULL 
+for (i in 1:length(onto_process$word)) { 
+  diction_process<-data.frame(word2_process[grep(onto_process$word[i], word2_process$word), ]) %>%
+    rbind(diction_process)
+} 
+
+#key word matrix
+mat2_process <- as.character(diction_process$word) %>%
+                unique()  %>%
+                dtm_process[,.] %>%
+                as.matrix() 
+
+#find word with max TFIDF
+concept_process <- apply(mat2_process, 1, which.max) %>%
+                   colnames(mat2_process)[.] %>%
+                   cbind(Publication.numbers=df_process$Publication.numbers, concept=., max_TFIDF=apply(mat2_process, 1, max))%>%
+                   as.data.frame()
+#View(concept_process)
+```
+
+各篇Aparatus專利之重點概念分析
+```{r}
+# Apparatus concept--------------------------------------------------------------------------------------------
+df_apparatus <- as.data.frame(tech_category_2[tech_category_2$category=="Apparatus",], stringsAsFactors = F)
+corpus_apparatus <- df_apparatus[,c(2,3,4)] %>% 
+                    DataframeSource() %>%
+                    Corpus()
+
+#Pre-processing and tranforming the Corpus
+#myStopwords <- c(stopwords("english"), stopwords("SMART"),"claim")
+apparatuss_tm <- tm_map(corpus_apparatus, content_transformer(tolower)) %>%
+                 tm_map(removePunctuation) %>% #去除標點符號
+                 tm_map(removeNumbers)  %>% #去除數字
+                 tm_map(removeWords, myStopwords)  %>% #消除停止(SMART&English)
+                 tm_map(stripWhitespace) %>% #消除空格
+                 tm_map(stemDocument)
+
+dtm_apparatuss <- DocumentTermMatrix(apparatuss_tm, control = list(tokenize = BigramTokenizer,
+                                                             weighting = function(x) weightTfIdf(x, normalize = TRUE)))
+
+inspect(dtm_apparatuss)
+
+#all word data frame
+word2_apparatuss <- as.matrix(dtm_apparatuss) %>%
+                    colSums() %>%
+                    sort(.,decreasing=TRUE) %>%
+                    data.frame(row.names = NULL, word=names(.), TFIDF=.)
+
+#ontology word dictionary
+onto_apparatus <- data.frame(word=c("apparatus", "equip", "system", "transfer","detect", "suppli", "clean", "measur", "monitor", "control", "signal", "laser", "ultrason", "sensor", "color identifi", "carrier", "devic", 
+                                    "head", "end point", "tool", "plasma", "treat", "treatment"))
+diction_apparatuss <- NULL
+for (i in 1:length(onto_apparatus$word)) { 
+  diction_apparatuss<-data.frame(word2_apparatuss[grep(onto_apparatus$word[i], word2_apparatuss$word), ]) %>%
+    rbind(diction_apparatuss)
+} 
+
+#key words matrix
+mat2_apparatuss<- as.character(diction_apparatuss$word) %>%
+                  unique()  %>%
+                  dtm_apparatuss[,.] %>%
+                  as.matrix() 
+
+#find word with max TFIDF
+concept_apparatuss <- apply(mat2_apparatuss, 1, which.max) %>%
+                      colnames(mat2_apparatuss)[.] %>%
+                      cbind(Publication.numbers=df_apparatus$Publication.numbers, concept=., max_TFIDF=apply(mat2_apparatuss, 1, max))%>%
+                      as.data.frame()
+#View(concept_apparatuss)
+```
+
+
+將概念分析結果(concept、max_TFIDF)加入原專利表中
+```{r}
+#bind concept into "tech_category"----------------------------------------------------------------------------------------------
+bind_all <- rbind(concept_slurry, concept_dresser, concept_pad, concept_process, concept_apparatuss)
+tech_category$concept <-bind_all[match(tech_category$Publication.numbers, bind_all$Publication.numbers), 'concept']
+tech_category$max_TFIDF <-bind_all[match(tech_category$Publication.numbers, bind_all$Publication.numbers), 'max_TFIDF']
+#View(tech_category)
+
+#write.csv(tech_category, file = "concept.csv")
+```
+
+## 各專利之重點概念分析結果
+
+- [技術分類表單連結網址](https://yarmi1224.shinyapps.io/concept/)
+
+```{r tabsets, echo=FALSE}
+shinyAppDir(
+  system.file("examples/concept", package = "shiny"),
+  options = list(
+    width = "100%", height = 550
+  )
+)
+```
